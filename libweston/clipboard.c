@@ -33,7 +33,8 @@
 #include <unistd.h>
 #include <sys/uio.h>
 
-#include "compositor.h"
+#include <libweston/libweston.h>
+#include "libweston-internal.h"
 #include "shared/helpers.h"
 
 struct clipboard_source {

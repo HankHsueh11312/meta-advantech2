@@ -37,11 +37,14 @@
 #include <values.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <errno.h>
 
 #include "shared/helpers.h"
 #include "shared/os-compatibility.h"
 #include "shared/timespec-util.h"
-#include "compositor.h"
+#include <libweston/libweston.h>
+#include "backend.h"
+#include "libweston-internal.h"
 #include "relative-pointer-unstable-v1-server-protocol.h"
 #include "pointer-constraints-unstable-v1-server-protocol.h"
 #include "input-timestamps-unstable-v1-server-protocol.h"
@@ -581,7 +584,7 @@ weston_pointer_has_focus_resource(struct weston_pointer *pointer)
  * \param pointer The pointer where the button events originates from.
  * \param time The timestamp of the event
  * \param button The button value of the event
- * \param value The state enum value of the event
+ * \param state The state enum value of the event
  *
  * For every resource that is currently in focus, send a wl_pointer.button event
  * with the passed parameters. The focused resources are the wl_pointer
@@ -638,8 +641,7 @@ default_grab_pointer_button(struct weston_pointer_grab *grab,
  *
  * \param pointer The pointer where the axis events originates from.
  * \param time The timestamp of the event
- * \param axis The axis enum value of the event
- * \param value The axis value of the event
+ * \param event The axis value of the event
  *
  * For every resource that is currently in focus, send a wl_pointer.axis event
  * with the passed parameters. The focused resources are the wl_pointer
@@ -1516,10 +1518,10 @@ send_enter_to_resource_list(struct wl_list *list,
 	struct wl_resource *resource;
 
 	wl_resource_for_each(resource, list) {
-		send_modifiers_to_resource(keyboard, resource, serial);
 		wl_keyboard_send_enter(resource, serial,
 				       surface->resource,
 				       &keyboard->keys);
+		send_modifiers_to_resource(keyboard, resource, serial);
 	}
 }
 
@@ -2084,11 +2086,30 @@ WL_EXPORT void
 weston_keyboard_send_keymap(struct weston_keyboard *kbd, struct wl_resource *resource)
 {
 	struct weston_xkb_info *xkb_info = kbd->xkb_info;
+	int fd;
+	size_t size;
+	enum ro_anonymous_file_mapmode mapmode;
+
+	if (wl_resource_get_version(resource) < 7)
+		mapmode = RO_ANONYMOUS_FILE_MAPMODE_SHARED;
+	else
+		mapmode = RO_ANONYMOUS_FILE_MAPMODE_PRIVATE;
+
+	fd = os_ro_anonymous_file_get_fd(xkb_info->keymap_rofile, mapmode);
+	size = os_ro_anonymous_file_size(xkb_info->keymap_rofile);
+
+	if (fd == -1) {
+		weston_log("creating a keymap file failed: %s\n",
+			   strerror(errno));
+		return;
+	}
 
 	wl_keyboard_send_keymap(resource,
 				WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1,
-				xkb_info->keymap_fd,
-				xkb_info->keymap_size);
+				fd,
+				size);
+
+	os_ro_anonymous_file_put_fd(fd);
 }
 
 static void
@@ -2519,8 +2540,8 @@ weston_compositor_set_touch_mode_calib(struct weston_compositor *compositor)
  * \param device The physical device that generated the event.
  * \param time The event timestamp.
  * \param touch_id ID for the touch point of this event (multi-touch).
- * \param double_x X coordinate in compositor global space.
- * \param double_y Y coordinate in compositor global space.
+ * \param x X coordinate in compositor global space.
+ * \param y Y coordinate in compositor global space.
  * \param norm Normalized device X, Y coordinates in calibration space, or NULL.
  * \param touch_type Either WL_TOUCH_DOWN, WL_TOUCH_UP, or WL_TOUCH_MOTION.
  *
@@ -2827,28 +2848,6 @@ static const struct wl_keyboard_interface keyboard_interface = {
 	keyboard_release
 };
 
-static bool
-should_send_modifiers_to_client(struct weston_seat *seat,
-				struct wl_client *client)
-{
-	struct weston_keyboard *keyboard = weston_seat_get_keyboard(seat);
-	struct weston_pointer *pointer = weston_seat_get_pointer(seat);
-
-	if (keyboard &&
-	    keyboard->focus &&
-	    keyboard->focus->resource &&
-	    wl_resource_get_client(keyboard->focus->resource) == client)
-		return true;
-
-	if (pointer &&
-	    pointer->focus &&
-	    pointer->focus->surface->resource &&
-	    wl_resource_get_client(pointer->focus->surface->resource) == client)
-		return true;
-
-	return false;
-}
-
 static void
 seat_get_keyboard(struct wl_client *client, struct wl_resource *resource,
 		  uint32_t id)
@@ -2894,12 +2893,6 @@ seat_get_keyboard(struct wl_client *client, struct wl_resource *resource,
 
 	weston_keyboard_send_keymap(keyboard, cr);
 
-	if (should_send_modifiers_to_client(seat, client)) {
-		send_modifiers_to_resource(keyboard,
-					   cr,
-					   keyboard->focus_serial);
-	}
-
 	if (keyboard->focus && keyboard->focus->resource &&
 	    wl_resource_get_client(keyboard->focus->resource) == client) {
 		struct weston_surface *surface =
@@ -2912,6 +2905,10 @@ seat_get_keyboard(struct wl_client *client, struct wl_resource *resource,
 				       keyboard->focus_serial,
 				       surface->resource,
 				       &keyboard->keys);
+
+		send_modifiers_to_resource(keyboard,
+					   cr,
+					   keyboard->focus_serial);
 
 		/* If this is the first keyboard resource for this
 		 * client... */
@@ -3099,7 +3096,7 @@ weston_compositor_set_xkb_rule_names(struct weston_compositor *ec,
 				     struct xkb_rule_names *names)
 {
 	if (ec->xkb_context == NULL) {
-		ec->xkb_context = xkb_context_new(0);
+		ec->xkb_context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
 		if (ec->xkb_context == NULL) {
 			weston_log("failed to create XKB context\n");
 			return -1;
@@ -3126,10 +3123,7 @@ weston_xkb_info_destroy(struct weston_xkb_info *xkb_info)
 
 	xkb_keymap_unref(xkb_info->keymap);
 
-	if (xkb_info->keymap_area)
-		munmap(xkb_info->keymap_area, xkb_info->keymap_size);
-	if (xkb_info->keymap_fd >= 0)
-		close(xkb_info->keymap_fd);
+	os_ro_anonymous_file_destroy(xkb_info->keymap_rofile);
 	free(xkb_info);
 }
 
@@ -3150,14 +3144,14 @@ weston_compositor_xkb_destroy(struct weston_compositor *ec)
 static struct weston_xkb_info *
 weston_xkb_info_create(struct xkb_keymap *keymap)
 {
+	char *keymap_string;
+	size_t keymap_size;
 	struct weston_xkb_info *xkb_info = zalloc(sizeof *xkb_info);
 	if (xkb_info == NULL)
 		return NULL;
 
 	xkb_info->keymap = xkb_keymap_ref(keymap);
 	xkb_info->ref_count = 1;
-
-	char *keymap_str;
 
 	xkb_info->shift_mod = xkb_keymap_mod_get_index(xkb_info->keymap,
 						       XKB_MOD_NAME_SHIFT);
@@ -3183,38 +3177,25 @@ weston_xkb_info_create(struct xkb_keymap *keymap)
 	xkb_info->scroll_led = xkb_keymap_led_get_index(xkb_info->keymap,
 							XKB_LED_NAME_SCROLL);
 
-	keymap_str = xkb_keymap_get_as_string(xkb_info->keymap,
-					      XKB_KEYMAP_FORMAT_TEXT_V1);
-	if (keymap_str == NULL) {
+	keymap_string = xkb_keymap_get_as_string(xkb_info->keymap,
+							   XKB_KEYMAP_FORMAT_TEXT_V1);
+	if (keymap_string == NULL) {
 		weston_log("failed to get string version of keymap\n");
 		goto err_keymap;
 	}
-	xkb_info->keymap_size = strlen(keymap_str) + 1;
+	keymap_size = strlen(keymap_string) + 1;
 
-	xkb_info->keymap_fd = os_create_anonymous_file(xkb_info->keymap_size);
-	if (xkb_info->keymap_fd < 0) {
-		weston_log("creating a keymap file for %lu bytes failed: %m\n",
-			(unsigned long) xkb_info->keymap_size);
-		goto err_keymap_str;
-	}
+	xkb_info->keymap_rofile = os_ro_anonymous_file_create(keymap_size,
+							      keymap_string);
+	free(keymap_string);
 
-	xkb_info->keymap_area = mmap(NULL, xkb_info->keymap_size,
-				     PROT_READ | PROT_WRITE,
-				     MAP_SHARED, xkb_info->keymap_fd, 0);
-	if (xkb_info->keymap_area == MAP_FAILED) {
-		weston_log("failed to mmap() %lu bytes\n",
-			(unsigned long) xkb_info->keymap_size);
-		goto err_dev_zero;
+	if (!xkb_info->keymap_rofile) {
+		weston_log("failed to create anonymous file for keymap\n");
+		goto err_keymap;
 	}
-	strcpy(xkb_info->keymap_area, keymap_str);
-	free(keymap_str);
 
 	return xkb_info;
 
-err_dev_zero:
-	close(xkb_info->keymap_fd);
-err_keymap_str:
-	free(keymap_str);
 err_keymap:
 	xkb_keymap_unref(xkb_info->keymap);
 	free(xkb_info);
@@ -3444,7 +3425,8 @@ weston_seat_init(struct weston_seat *seat, struct weston_compositor *ec,
 	wl_signal_init(&seat->destroy_signal);
 	wl_signal_init(&seat->updated_caps_signal);
 
-	seat->global = wl_global_create(ec->wl_display, &wl_seat_interface, 5,
+	seat->global = wl_global_create(ec->wl_display, &wl_seat_interface,
+					MIN(wl_seat_interface.version, 7),
 					seat, bind_seat);
 
 	seat->compositor = ec;
@@ -3625,6 +3607,7 @@ weston_seat_get_touch(struct weston_seat *seat)
 
 /** Sets the keyboard focus to the given surface
  *
+ * \param surface the surface to focus on
  * \param seat The seat to query
  */
 WL_EXPORT void

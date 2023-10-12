@@ -31,9 +31,11 @@
 
 #include "shared/helpers.h"
 #include "shared/string-helpers.h"
-#include "shared/zalloc.h"
+#include <libweston/zalloc.h>
 #include "shared/timespec-util.h"
-#include "compositor.h"
+#include <libweston/libweston.h>
+#include "libweston-internal.h"
+#include "backend.h"
 
 #include "weston-touch-calibration-server-protocol.h"
 
@@ -358,8 +360,6 @@ destroy_touch_calibrator(struct wl_resource *resource)
 
 	if (calibrator->surface) {
 		unmap_calibrator(calibrator);
-		weston_surface_set_role(calibrator->surface, NULL,
-					calibrator->surface->resource, 0);
 		wl_list_remove(&calibrator->surface_destroy_listener.link);
 		wl_list_remove(&calibrator->surface_commit_listener.link);
 	}
