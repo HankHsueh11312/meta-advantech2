@@ -1,0 +1,49 @@
+From a02660731c7adc5fb23acd56f13379d2ecd83d1c Mon Sep 17 00:00:00 2001
+From: "Hank.Hsueh" <Hank.Hsueh@advantech.com.tw>
+Date: Mon, 16 Jun 2025 17:40:19 +0800
+Subject: [PATCH] 0003-add-imx8qxp-rom3620a1-4G-support.patch
+
+---
+ meta-fsl-imx/recipes-security/optee-imx/conf.mk      | 6 ++++++
+ meta-fsl-imx/recipes-security/optee-imx/nxp_build.sh | 1 +
+ 2 files changed, 7 insertions(+)
+
+diff --git a/meta-fsl-imx/recipes-security/optee-imx/conf.mk b/meta-fsl-imx/recipes-security/optee-imx/conf.mk
+index c190750..01b1e7d 100644
+--- a/meta-fsl-imx/recipes-security/optee-imx/conf.mk
++++ b/meta-fsl-imx/recipes-security/optee-imx/conf.mk
+@@ -73,6 +73,7 @@ mx8mp-flavorlist = \
+ 
+ mx8qm-flavorlist = \
+ 	mx8qmmek \
++	mx8qxprom3620a1 \
+ 
+ mx8qx-flavorlist = \
+ 	mx8qxpmek \
+@@ -360,6 +361,11 @@ CFG_UART_BASE ?= UART0_BASE
+ $(call force,CFG_TZC380,n)
+ endif
+ 
++ifneq (,$(filter $(PLATFORM_FLAVOR),mx8qxprom3620a1))
++CFG_DDR_SIZE ?= 0x100000000
++CFG_UART_BASE ?= UART0_BASE
++endif
++
+ ifneq (,$(filter $(PLATFORM_FLAVOR),mx8dxmek))
+ CFG_DDR_SIZE ?= 0x40000000
+ CFG_UART_BASE ?= UART0_BASE
+diff --git a/meta-fsl-imx/recipes-security/optee-imx/nxp_build.sh b/meta-fsl-imx/recipes-security/optee-imx/nxp_build.sh
+index 3819893..cad9e46 100755
+--- a/meta-fsl-imx/recipes-security/optee-imx/nxp_build.sh
++++ b/meta-fsl-imx/recipes-security/optee-imx/nxp_build.sh
+@@ -35,6 +35,7 @@ boards_list=(
+ 	mx8mnevk \
+ 	mx8mpevk \
+ 	mx8qxpmek \
++	mx8qxprom3620a1 \
+ 	mx8qmmek \
+ 	mx8dxlevk \
+ 	ls1021atwr \
+-- 
+2.34.1
+
